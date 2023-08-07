@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as nnf
+import numpy as np
 
 
 class SpatialTransformer(nn.Module):
@@ -25,7 +26,7 @@ class SpatialTransformer(nn.Module):
         # is included when saving weights to disk, so the model files are way bigger
         # than they need to be. so far, there does not appear to be an elegant solution.
         # see: https://discuss.pytorch.org/t/how-to-register-buffer-without-polluting-state-dict
-        self.register_buffer('grid', grid)
+        self.register_buffer('grid', grid, persistent=False)
 
     def forward(self, src, flow):
         # new locations
@@ -95,3 +96,55 @@ class ResizeTransform(nn.Module):
 
         # don't do anything if resize is 1
         return x
+class MeanStream(nn.Module):
+    def __init__(self,input_shape, cap=100, **kwargs) -> None:
+        super(MeanStream, self).__init__()
+        self.cap = float(cap)
+        self.register_buffer(name='mean',
+                                         tensor=torch.zeros(input_shape))
+        self.register_buffer(name='count',
+                                         tensor=torch.zeros(1))
+        # v = np.prod(*input_shape)
+        # self.register_buffer(name='cov', 
+        #                                 tensor= torch.zeros(v,v))
+        self.flatten = nn.Flatten()
+    def forward(self,x,registration=False):
+        batch_size = x.shape[0]
+        if registration :
+            return torch.minimum(torch.tensor(1.), self.count/self.cap) * torch.stack([self.mean for _ in range(batch_size)])
+        
+        # update mean and count
+        new_mean, new_count = _mean_update(self.mean, self.count, x, self.cap)
+        
+        self.mean = new_mean.detach()
+        self.count = new_count.detach()
+        # self.cov = new_cov
+        return torch.minimum(torch.tensor(1.), new_count / self.cap) * torch.stack([new_mean for _ in range(batch_size)])
+
+def _mean_update(pre_mean, pre_count, x, pre_cap=None):
+    # compute this batch stats
+    this_sum = torch.sum(x, 0)
+    pre_cap = torch.tensor(pre_cap)
+    # increase count and compute weights
+    new_count = pre_count + x.shape[0]
+    alpha = x.shape[0] / torch.minimum(new_count, pre_cap)
+
+    # compute new mean. Note that once we reach self.cap (e.g. 1000),
+    # the 'previous mean' matters less
+
+    new_mean = pre_mean * (1 - alpha) + (this_sum / x.shape[0]) * alpha
+
+    return (new_mean, new_count)
+
+class LocalParamWithInput(nn.Module):
+    def __init__(self, shape, initializer=None, mult=1.0, **kwargs) -> None:
+        super(LocalParamWithInput).__init__()
+        self.shape = shape # no batch
+        self.initializer = initializer
+        self.biasmult = mult
+        self.kernel = nn.Parameter(self.initializer(torch.empty(shape)))
+
+    def forward(self, x):
+        batch_size = x.shape[0]
+        params = self.kernel * self.biasmult
+        return torch.stack([params for _ in batch_size])

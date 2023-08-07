@@ -250,7 +250,9 @@ class VxmDense(LoadableModel):
         '''
 
         # concatenate inputs and propagate unet
-        x = torch.cat([source, target], dim=1)
+        batch_size = source.shape[0]
+        target = torch.stack([target for _ in range(batch_size)])
+        x = torch.cat((source, target),dim=1)
         x = self.unet_model(x)
 
         # transform into flow field
@@ -282,9 +284,57 @@ class VxmDense(LoadableModel):
 
         # return non-integrated flow field if training
         if not registration:
-            return (y_source, y_target, preint_flow) if self.bidir else (y_source, preint_flow)
+            return (y_source, y_target, pos_flow, neg_flow) if self.bidir else (y_source, preint_flow)
         else:
             return y_source, pos_flow
+        
+class TemplateCreation(LoadableModel):
+    """
+    VoxelMorph network to generate an unconditional template image.
+    """
+
+    @store_config_args
+    def __init__(self, inshape, init_altas, nb_unet_features=None, mean_cap=100, atlas_feats=1, src_feats=1,
+                 **kwargs):
+        """ 
+        Parameters:
+            inshape: Input shape. e.g. (192, 192, 192)
+            nb_unet_features: Unet convolutional features. 
+                See VxmDense documentation for more information.
+            mean_cap: Cap for mean stream. Default is 100.
+            atlas_feats: Number of atlas/template features. Default is 1.
+            src_feats: Number of source image features. Default is 1.
+            kwargs: Forwarded to the internal VxmDense model.
+        """
+        super().__init__()
+        # configure inputs
+        # source_input = tf.keras.Input(shape=[*inshape, src_feats], name='source_input')
+
+        # pre-warp (atlas) model: source input -> atlas 
+        self.atlas= nn.Parameter(init_altas)
+
+        self.mult = 1.0
+        # warp model source input -> atlas,source input
+        self.vxm_model = VxmDense(inshape, nb_unet_features=nb_unet_features,
+                             bidir=True, **kwargs)
+
+        # get mean stream of negative flow
+        self.mean_stream = layers.MeanStream(inshape, cap=mean_cap)
+
+        # initialize the keras model
+    def forward(self, source_input, registration=False):
+
+        
+        if not registration:
+            y_source, y_target, pos_flow, neg_flow = self.vxm_model(source_input,self.atlas, registration)
+            mean_flow = 0
+            mean_flow = self.mean_stream(neg_flow, registration)
+            return y_source, y_target, mean_flow, pos_flow
+        else:
+            y_source, pos_flow = self.vxm_model(source_input,self.atlas, registration)
+            return y_source, pos_flow
+
+        
 
 
 class ConvBlock(nn.Module):
@@ -292,7 +342,7 @@ class ConvBlock(nn.Module):
     Specific convolutional block followed by leakyrelu for unet.
     """
 
-    def __init__(self, ndims, in_channels, out_channels, stride=1):
+    def __init__(self, ndims,  in_channels, out_channels, stride=1):
         super().__init__()
 
         Conv = getattr(nn, 'Conv%dd' % ndims)
