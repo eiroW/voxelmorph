@@ -308,10 +308,11 @@ class TemplateCreation(LoadableModel):
         """
         super().__init__()
         # configure inputs
-        # source_input = tf.keras.Input(shape=[*inshape, src_feats], name='source_input')
 
         # pre-warp (atlas) model: source input -> atlas 
-        self.atlas= nn.Parameter(init_altas)
+        # self.atlas= nn.Parameter(init_altas)
+        rand_altas = nn.init.normal_(torch.empty(1, *inshape),mean=0, std=1e-7)
+        self.atlas= nn.Parameter(rand_altas)
 
         self.mult = 1.0
         # warp model source input -> atlas,source input
@@ -323,13 +324,12 @@ class TemplateCreation(LoadableModel):
 
         # initialize the keras model
     def forward(self, source_input, registration=False):
-
         
         if not registration:
             y_source, y_target, pos_flow, neg_flow = self.vxm_model(source_input,self.atlas, registration)
             mean_flow = 0
             mean_flow = self.mean_stream(neg_flow, registration)
-            return y_source, y_target, mean_flow, pos_flow
+            return y_target, y_source, mean_flow, pos_flow
         else:
             y_source, pos_flow = self.vxm_model(source_input,self.atlas, registration)
             return y_source, pos_flow
