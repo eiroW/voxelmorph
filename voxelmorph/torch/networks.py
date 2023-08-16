@@ -236,6 +236,7 @@ class VxmDense(LoadableModel):
 
         # configure optional integration layer for diffeomorphic warp
         down_shape = [int(dim / int_downsize) for dim in inshape]
+        
         self.integrate = layers.VecInt(down_shape, int_steps) if int_steps > 0 else None
 
         # configure transformer
@@ -250,8 +251,7 @@ class VxmDense(LoadableModel):
         '''
 
         # concatenate inputs and propagate unet
-        batch_size = source.shape[0]
-        target = torch.stack([target for _ in range(batch_size)])
+        
         x = torch.cat((source, target),dim=1)
         x = self.unet_model(x)
 
@@ -294,7 +294,7 @@ class TemplateCreation(LoadableModel):
     """
 
     @store_config_args
-    def __init__(self, inshape, init_altas, nb_unet_features=None, mean_cap=100, atlas_feats=1, src_feats=1,
+    def __init__(self, inshape, init_atlas, nb_unet_features=None, mean_cap=100, atlas_feats=1, src_feats=1,
                  **kwargs):
         """ 
         Parameters:
@@ -310,9 +310,9 @@ class TemplateCreation(LoadableModel):
         # configure inputs
 
         # pre-warp (atlas) model: source input -> atlas 
-        # self.atlas= nn.Parameter(init_altas)
-        rand_altas = nn.init.normal_(torch.empty(1, *inshape),mean=0, std=1e-7)
-        self.atlas= nn.Parameter(rand_altas)
+        self.atlas= nn.Parameter(init_atlas)
+        # rand_atlas = nn.init.normal_(torch.empty(1, *inshape),mean=0, std=1e-7)
+        # self.atlas= nn.Parameter(rand_atlas)
 
         self.mult = 1.0
         # warp model source input -> atlas,source input
@@ -324,19 +324,19 @@ class TemplateCreation(LoadableModel):
 
         # initialize the keras model
     def forward(self, source_input, registration=False):
+        batch_size = source_input.shape[0]
+
+        atlas = torch.stack([self.atlas for _ in range(batch_size)])
         
         if not registration:
-            y_source, y_target, pos_flow, neg_flow = self.vxm_model(source_input,self.atlas, registration)
-            mean_flow = 0
+            y_source, y_target, pos_flow, neg_flow = self.vxm_model(atlas, source_input,registration)
             mean_flow = self.mean_stream(neg_flow, registration)
-            return y_target, y_source, mean_flow, pos_flow
+            return y_source, y_target, mean_flow, pos_flow
         else:
-            y_source, pos_flow = self.vxm_model(source_input,self.atlas, registration)
+            y_source, pos_flow = self.vxm_model(source_input, atlas, registration)
             return y_source, pos_flow
 
         
-
-
 class ConvBlock(nn.Module):
     """
     Specific convolutional block followed by leakyrelu for unet.

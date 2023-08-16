@@ -16,7 +16,7 @@ class SpatialTransformer(nn.Module):
 
         # create sampling grid
         vectors = [torch.arange(0, s) for s in size]
-        grids = torch.meshgrid(vectors)
+        grids = torch.meshgrid(vectors, indexing='ij')
         grid = torch.stack(grids)
         grid = torch.unsqueeze(grid, 0)
         grid = grid.type(torch.FloatTensor)
@@ -101,13 +101,12 @@ class MeanStream(nn.Module):
         super(MeanStream, self).__init__()
         self.cap = float(cap)
         self.register_buffer(name='mean',
-                                         tensor=torch.zeros(input_shape))
+                                         tensor=torch.zeros((len(input_shape),*input_shape)))
         self.register_buffer(name='count',
                                          tensor=torch.zeros(1))
         # v = np.prod(*input_shape)
         # self.register_buffer(name='cov', 
         #                                 tensor= torch.zeros(v,v))
-        self.flatten = nn.Flatten()
     def forward(self,x,registration=False):
         batch_size = x.shape[0]
         if registration :
@@ -115,7 +114,6 @@ class MeanStream(nn.Module):
         
         # update mean and count
         new_mean, new_count = _mean_update(self.mean, self.count, x, self.cap)
-        
         self.mean = new_mean.detach()
         self.count = new_count.detach()
         # self.cov = new_cov
@@ -123,7 +121,7 @@ class MeanStream(nn.Module):
 
 def _mean_update(pre_mean, pre_count, x, pre_cap=None):
     # compute this batch stats
-    this_sum = torch.sum(x, 0)
+    this_mean = torch.mean(x, 0)
     pre_cap = torch.tensor(pre_cap)
     # increase count and compute weights
     new_count = pre_count + x.shape[0]
@@ -132,7 +130,7 @@ def _mean_update(pre_mean, pre_count, x, pre_cap=None):
     # compute new mean. Note that once we reach self.cap (e.g. 1000),
     # the 'previous mean' matters less
 
-    new_mean = pre_mean * (1 - alpha) + (this_sum / x.shape[0]) * alpha
+    new_mean = pre_mean * (1 - alpha) + (this_mean) * alpha
 
     return (new_mean, new_count)
 

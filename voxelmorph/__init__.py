@@ -45,7 +45,7 @@ else:
     os.environ['NEURITE_BACKEND'] = 'tensorflow'
 
     # ensure valid tensorflow version is available
-    minv = '2.4'
+    minv = '2.2'
     curv = getattr(tensorflow, '__version__', None)
     if curv is None or version.parse(curv) < version.parse(minv):
         raise ImportError(f'voxelmorph requires tensorflow version {minv} or greater, '
