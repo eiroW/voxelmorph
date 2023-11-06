@@ -1,0 +1,2 @@
+#!/bin/sh 
+CUDA_VISIBLE_DEVICES=0,1 nohup torchrun  --nproc-per-node=2 train-atlas.py 1500 10 whole --batch_size 1 --save_path /data01/junyi/models/models_sep/snapshot20_alltracts --init_atlas FA_init_atlas.pt&

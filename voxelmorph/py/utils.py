@@ -25,7 +25,7 @@ def get_backend():
     Returns the currently used backend. Default is tensorflow unless the
     VXM_BACKEND environment variable is set to 'pytorch'.
     """
-    return 'pytorch' if os.environ.get('VXM_BACKEND') == 'pytorch' else 'tensorflow'
+    return 'tensorflow' if os.environ.get('VXM_BACKEND') == 'tensorflow' else 'pytorch'
 
 
 def read_file_list(filename, prefix=None, suffix=None):

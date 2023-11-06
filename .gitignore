@@ -15,9 +15,16 @@ parts/
 sdist/
 var/
 wheels/
+tmp/
+
 pip-wheel-metadata/
 share/python-wheels/
 *.egg-info/
 .installed.cfg
+*.nii.gz
+*.npz
 *.egg
+*.pt
+*.log
+*.out
 MANIFEST

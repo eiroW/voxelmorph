@@ -3,10 +3,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions.normal import Normal
-
+from typing import List, Dict
+from collections import OrderedDict
 from .. import default_unet_features
 from . import layers
 from .modelio import LoadableModel, store_config_args
+import logging
+
+
+torch.set_float32_matmul_precision('high')
+
 
 
 class Unet(nn.Module):
@@ -118,7 +124,7 @@ class Unet(nn.Module):
 
         # cache final number of features
         self.final_nf = prev_nf
-
+    # @torch.compile
     def forward(self, x):
 
         # encoder forward pass
@@ -162,7 +168,9 @@ class VxmDense(LoadableModel):
                  use_probs=False,
                  src_feats=1,
                  trg_feats=1,
-                 unet_half_res=False):
+                 unet_half_res=False,
+                 use_TOM = True,
+                 **kwargs):
         """ 
         Parameters:
             inshape: Input shape. e.g. (192, 192, 192)
@@ -241,8 +249,12 @@ class VxmDense(LoadableModel):
 
         # configure transformer
         self.transformer = layers.SpatialTransformer(inshape)
-
-    def forward(self, source, target, registration=False):
+        self.use_TOM = use_TOM
+        if use_TOM:
+            self.reorient = layers.TOMReorientation(inshape,)
+        
+    # @torch.compile
+    def forward(self, source, target, registration=False, fusion_regist=False):
         '''
         Parameters:
             source: Source image tensor.
@@ -262,9 +274,10 @@ class VxmDense(LoadableModel):
         pos_flow = flow_field
         if self.resize:
             pos_flow = self.resize(pos_flow)
-
+        if fusion_regist :
+            return pos_flow
         preint_flow = pos_flow
-
+        
         # negate flow for bidirectional model
         neg_flow = -pos_flow if self.bidir else None
 
@@ -277,24 +290,34 @@ class VxmDense(LoadableModel):
             if self.fullsize:
                 pos_flow = self.fullsize(pos_flow)
                 neg_flow = self.fullsize(neg_flow) if self.bidir else None
-
+        
+        
         # warp image with flow field
         y_source = self.transformer(source, pos_flow)
-        y_target = self.transformer(target, neg_flow) if self.bidir else None
+        if self.use_TOM:
+            rotMat = self.reorient(pos_flow) 
+            target = self.reorient.batched_rotate(rotMat.mT, target)
+            y_target = self.transformer(target, neg_flow) if self.bidir else None
+            y_source = self.reorient.batched_rotate(rotMat, y_source)
+        else:
+            y_target = self.transformer(target, neg_flow) if self.bidir else None
 
         # return non-integrated flow field if training
         if not registration:
             return (y_source, y_target, pos_flow, neg_flow) if self.bidir else (y_source, preint_flow)
         else:
             return y_source, pos_flow
-        
+    
 class TemplateCreation(LoadableModel):
     """
     VoxelMorph network to generate an unconditional template image.
     """
 
     @store_config_args
-    def __init__(self, inshape, init_atlas, nb_unet_features=None, mean_cap=100, atlas_feats=1, src_feats=1,
+    def __init__(self, inshape, init_atlas, 
+                 nb_unet_features=None, 
+                 mean_cap=100,
+                 altas_feats=1,
                  **kwargs):
         """ 
         Parameters:
@@ -308,35 +331,132 @@ class TemplateCreation(LoadableModel):
         """
         super().__init__()
         # configure inputs
-
-        # pre-warp (atlas) model: source input -> atlas 
+        self.type = type
+        # pre-warp (atlas) model: source input -> atlas
         self.atlas= nn.Parameter(init_atlas)
         # rand_atlas = nn.init.normal_(torch.empty(1, *inshape),mean=0, std=1e-7)
         # self.atlas= nn.Parameter(rand_atlas)
 
         self.mult = 1.0
         # warp model source input -> atlas,source input
-        self.vxm_model = VxmDense(inshape, nb_unet_features=nb_unet_features,
-                             bidir=True, **kwargs)
+        self.vxm_model = VxmDense(inshape, 
+                                  nb_unet_features=nb_unet_features,
+                                  bidir=True,
+                                  trg_feats=altas_feats,
+                                  **kwargs)
 
         # get mean stream of negative flow
         self.mean_stream = layers.MeanStream(inshape, cap=mean_cap)
 
+        # TOM rotation 
+        self.reorient = layers.TOMReorientation(inshape,)
+
         # initialize the keras model
-    def forward(self, source_input, registration=False):
+    # @torch.compile
+    def forward(self, source_input, registration=False, fusion_regist=False):
         batch_size = source_input.shape[0]
 
         atlas = torch.stack([self.atlas for _ in range(batch_size)])
+        if fusion_regist:
+            flow = self.vxm_model(source_input, atlas ,registration,fusion_regist=fusion_regist)
+            return flow
         
         if not registration:
-            y_source, y_target, pos_flow, neg_flow = self.vxm_model(atlas, source_input,registration)
+            y_source, y_target, pos_flow, neg_flow = self.vxm_model(source_input, atlas ,registration)
+            # TOM reoriention
             mean_flow = self.mean_stream(neg_flow, registration)
             return y_source, y_target, mean_flow, pos_flow
         else:
             y_source, pos_flow = self.vxm_model(source_input, atlas, registration)
+
             return y_source, pos_flow
+class WholeModel(nn.Module):
+    def __init__(self, inshape, init_altas, 
+                 TOM_models:dict[str,TemplateCreation], 
+                 *args,
+                 int_downsize=2,
+                 int_steps=7,
+                 FA_only = False,
+                 **kwargs):
+        super(WholeModel,self).__init__()
+        ndims = len(inshape)
+        self.TOM_models = nn.ModuleDict(TOM_models)
+        self.FA_model = TemplateCreation(inshape,init_altas,**kwargs)
+        if not FA_only:
+            self.flow_multi = ConvBlock(ndims,(len(TOM_models) + 1) * 3, 3,)
+            nn.init.normal_(self.flow_multi.main.weight,mean=0,std=1e-3)
+            nn.init.zeros_(self.flow_multi.main.bias)
+
+        down_shape = [int(dim / int_downsize) for dim in inshape]
+    
+        self.integrate = layers.VecInt(down_shape, int_steps) if int_steps > 0 else None
+        # resize to full res
+        if int_steps > 0 and int_downsize > 1:
+            self.fullsize = layers.ResizeTransform(1 / int_downsize, ndims)
+        else:
+            self.fullsize = None
+        # configure transformer
+        self.transformer = layers.SpatialTransformer(inshape)
+        self.reorient = layers.TOMReorientation(inshape,)
+        self.FA_only = FA_only
+
+    # @torch.compile
+    def forward(self, inputs_dict: dict[str,torch.Tensor],fusion_regist=True, registration=False,**kwargs):
+        registed_dict = {}
+        FA_only = self.FA_only
+        if FA_only:
+                FA_registed, registed_dict['FA'], mean_flow, pos_flow = self.FA_model(inputs_dict['FA'],fusion_regist=False)
+                if registration:
+                    return FA_registed, pos_flow
+        else:
+            flow_TOMs = []
+            with torch.no_grad():
+                for key, TOM_model in self.TOM_models.items():
+                    flow_TOM = TOM_model(inputs_dict[key],fusion_regist = fusion_regist)
+                    flow_TOMs.append(flow_TOM)
+            self.flow_TOMs = flow_TOMs
+            flow_FA = self.FA_model(inputs_dict['FA'],fusion_regist=fusion_regist)
+            batch_size = flow_FA.shape[0]
+            if self.training:
+                drop_prob = 0
+                rand_tensor_shape = (batch_size,len(inputs_dict)-1)+(1,)*(flow_FA.ndim-2)
+                rand_tensor = 1-drop_prob+torch.rand(rand_tensor_shape,dtype=flow_FA.dtype,device=flow_FA.device)
+                rand_tensor.floor_()
+                rand_tensor = torch.stack([rand_tensor for _ in range(3)],dim=1).reshape((batch_size,3*(len(inputs_dict)-1),*rand_tensor_shape[2:]))
+            else:
+                rand_tensor = 1
+            # logging.info(f'Drop path {rand_tensor}')
+            flow_fusion = self.flow_multi(torch.cat([rand_tensor*torch.cat(flow_TOMs,dim=1),flow_FA],dim=1))
+            # logging.info(f'Predict {flow_fusion}')
+            if self.integrate:
+                flow_fusion = self.integrate(flow_fusion)
+                neg_flow_fusion = self.integrate(-flow_fusion)
+
+                # resize to final resolution
+                if self.fullsize:
+                    pos_flow = self.fullsize(flow_fusion)
+                    neg_flow = self.fullsize(neg_flow_fusion)
+            # logging.info(f'Predict {neg_flow}')
+            mean_flow = self.FA_model.mean_stream(neg_flow,registration)
+            # logging.info(f'Predict {mean_flow}')
+            # warp image with flow field
+            FA_registed = self.transformer(inputs_dict['FA'], pos_flow)
+            if registration:
+                return FA_registed, pos_flow
+            
+            FA_atlas_registed = self.transformer(torch.stack([self.FA_model.atlas for _ in range(batch_size)]), neg_flow)
+
+            registed_dict = {}
+            registed_dict['FA'] = FA_atlas_registed
+            rotMat = self.reorient(neg_flow)
+            for keys, TOM_model in self.TOM_models.items():
+                TOM_atlas_registed = self.reorient.batched_rotate(rotMat, torch.stack([TOM_model.atlas for _ in range(batch_size)]))
+                TOM_atlas_registed = self.transformer(TOM_atlas_registed, neg_flow)
+                registed_dict[keys] = TOM_atlas_registed
 
         
+        return FA_registed, registed_dict, mean_flow, pos_flow
+            
 class ConvBlock(nn.Module):
     """
     Specific convolutional block followed by leakyrelu for unet.
@@ -348,8 +468,9 @@ class ConvBlock(nn.Module):
         Conv = getattr(nn, 'Conv%dd' % ndims)
         self.main = Conv(in_channels, out_channels, 3, stride, 1)
         self.activation = nn.LeakyReLU(0.2)
-
+    # @torch.compile
     def forward(self, x):
         out = self.main(x)
         out = self.activation(out)
         return out
+

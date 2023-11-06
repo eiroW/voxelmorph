@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as nnf
+import torch.nn.utils.parametrizations as parametrizations
 import numpy as np
 
 
@@ -107,6 +108,7 @@ class MeanStream(nn.Module):
         # v = np.prod(*input_shape)
         # self.register_buffer(name='cov', 
         #                                 tensor= torch.zeros(v,v))
+    # @torch.compile
     def forward(self,x,registration=False):
         batch_size = x.shape[0]
         if registration :
@@ -146,3 +148,73 @@ class LocalParamWithInput(nn.Module):
         batch_size = x.shape[0]
         params = self.kernel * self.biasmult
         return torch.stack([params for _ in batch_size])
+
+
+
+class TOMReorientation(nn.Module):
+    """
+    TOM Reorientation layer
+    """
+
+    def __init__(self, size):
+        super().__init__()
+        #size: (128, 160, 128)
+        # create sampling grid
+        # vectors = [torch.arange(0, s) for s in size]
+        # grids = torch.meshgrid(vectors,indexing='ij')
+        # grid = torch.stack(grids)
+        # grid = torch.unsqueeze(grid, 0)
+        # grid = grid.type(torch.FloatTensor)
+        # self.register_buffer('grid', grid, persistent=False)
+
+        # registering the grid as a buffer cleanly moves it to the GPU, but it also
+        # adds it to the state dict. this is annoying since everything in the state dict
+        # is included when saving weights to disk, so the model files are way bigger
+        # than they need to be. so far, there does not appear to be an elegant solution.
+        # see: https://discuss.pytorch.org/t/how-to-register-buffer-without-polluting-state-dict
+        self.register_buffer('ident', torch.eye(3), persistent=False)
+        # self.ident = grid
+        self.size = size
+        self.flatten = nn.Flatten(start_dim=2)
+
+    def forward(self,flow):
+        # new locations
+        # rotMat,keep = 
+        return self.compute_rotMat(flow.detach())
+    
+    @torch.no_grad()
+    def compute_rotMat(self, trans_grid:torch.Tensor):
+        # Compute Jacobian matrix and trans it into size(*inshape, 3, 3)
+        JacobiMat = torch.stack(gradient(trans_grid),dim=1).permute(1,2,3,4,5,0)
+        JacobiMat = self.flatten(JacobiMat).permute(-1,0,1).contiguous()
+
+        # U,_,V= torch.svd(JacobiMat)
+        # rotMat = torch.matmul(U.transpose(-1,-2),V)
+        return orthogonalize(JacobiMat+self.ident)
+    
+    # @torch.compile
+    def batched_rotate(self,rotMat:torch.Tensor, src:torch.Tensor):
+        batch_size = src.shape[0]
+        src = self.flatten(src.unsqueeze(2).permute(1,2,3,4,5,0))
+        src = src.permute(-1,0,1)
+        src = torch.matmul(rotMat, src)
+
+        return src.reshape(*(self.size),batch_size,3).permute(-2,-1,0,1,2)
+
+def gradient(trans_grid):
+    return torch.gradient(trans_grid, dim=(-3,-2,-1))
+
+def orthogonalize(X:torch.Tensor):
+    xtype = X.dtype
+    # Half SVD have not be implemented
+    X = X.float() if xtype == torch.float16 else X
+    U,_,V = torch.svd(X)
+    # h, tau = torch.geqrf(X)
+    # Q = torch.linalg.householder_product(h, tau)
+    Q = U @ V.mT
+    return Q.half() if xtype == torch.float16 else Q
+
+
+    
+
+
