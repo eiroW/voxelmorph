@@ -145,7 +145,7 @@ class Trainer():
 
         mean_flow_loss = lambda _,y_pred: torch.square(y_pred).mean()
         loss_funcs = [pos_loss_func,neg_loss_func, mean_flow_loss, vxm.losses.Grad('l2', loss_mult=2).loss]
-        loss_weights = [0.5, 0.5, 0.05, 0.01]
+        loss_weights = [0.5, 0.5, 0.1, 0.01]
         return loss_funcs, loss_weights
 
     

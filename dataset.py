@@ -12,24 +12,23 @@ backbone_tracts = ['AF', 'ATR', 'CA', 'CC',
                    'SLF_I', 'SLF_II', 'SLF_III', 'STR',
                    'ST_FO', 'ST_OCC', 'ST_PAR', 'ST_POSTC', 'ST_PREC', 'ST_PREF', 'ST_PREM',
                    'T_OCC', 'T_PAR', 'T_POSTC', 'T_PREC', 'T_PREF', 'T_PREM', 'UF']
-backbone_tracts = []
 
 class FiberDatasetDir(Dataset):
     def __init__(self, img_data_dir: pathlib.Path, backbone_tracts: list,transform=None, FA_only=True):
 
-        self.img_data_dir = sorted(list(pathlib.Path(img_data_dir).iterdir()))[:20]
+        self.img_data_dir = sorted(list(pathlib.Path(img_data_dir).iterdir()))
         self.transform = transform
         tmp = nib.load(list(self.img_data_dir[0].glob('**/FA_MNI*'))[0])
         self.config = (tmp.affine,tmp.header)
         self.shape = tmp.get_fdata().shape
         self.FA_only = FA_only
-        data_tmp = pathlib.Path('tmp')
+        data_tmp = pathlib.Path('/data04/junyi/tmp')
         self.backbone_tracts = backbone_tracts
         if not data_tmp.exists():
             os.mkdir(data_tmp)
         logger.info('Data preprocess start...')
 
-        p = Pool(5)
+        p = Pool(10)
         for i, img_data_path in enumerate(self.img_data_dir) :
             data_tmp_path =data_tmp/f'data{i:04d}.npz'
             logger.info(f'Saving {img_data_path} at {data_tmp_path}...')

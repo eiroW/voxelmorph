@@ -358,7 +358,7 @@ class TemplateCreation(LoadableModel):
 
         atlas = torch.stack([self.atlas for _ in range(batch_size)])
         if fusion_regist:
-            flow = self.vxm_model(source_input, atlas ,registration,fusion_regist=fusion_regist)
+            flow = self.vxm_model(source_input, atlas, registration, fusion_regist=fusion_regist)
             return flow
         
         if not registration:

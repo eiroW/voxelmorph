@@ -176,7 +176,7 @@ class TOMReorientation(nn.Module):
         # self.ident = grid
         self.size = size
         self.flatten = nn.Flatten(start_dim=2)
-
+    @torch.compile
     def forward(self,flow):
         # new locations
         # rotMat,keep = 
@@ -190,9 +190,19 @@ class TOMReorientation(nn.Module):
 
         # U,_,V= torch.svd(JacobiMat)
         # rotMat = torch.matmul(U.transpose(-1,-2),V)
-        return orthogonalize(JacobiMat+self.ident)
+        return fast_polar(JacobiMat+self.ident)
     
-    # @torch.compile
+    @torch.no_grad()
+    def compute_rotMat_skew_sym(self, trans_grid:torch.Tensor):
+        # Compute Jacobian matrix and trans it into size(*inshape, 3, 3)
+        JacobiMat = torch.stack(gradient(trans_grid),dim=1).permute(1,2,3,4,5,0)
+        JacobiMat = self.flatten(JacobiMat).permute(-1,0,1).contiguous()
+
+        # U,_,V= torch.svd(JacobiMat)
+        # rotMat = torch.matmul(U.transpose(-1,-2),V)
+        return skew_sym(JacobiMat)
+    
+    # 
     def batched_rotate(self,rotMat:torch.Tensor, src:torch.Tensor):
         batch_size = src.shape[0]
         src = self.flatten(src.unsqueeze(2).permute(1,2,3,4,5,0))
@@ -213,6 +223,28 @@ def orthogonalize(X:torch.Tensor):
     # Q = torch.linalg.householder_product(h, tau)
     Q = U @ V.mT
     return Q.half() if xtype == torch.float16 else Q
+
+def fast_polar(A:torch.Tensor):
+    temp = A
+    device = A.device
+    temp_norm = torch.ones((*(A.shape[:-2]),1,1),device=device)
+    mask = torch.ones(A.shape[:-2],dtype=bool,device=device)
+    old_norm = torch.ones((*(A.shape[:-2]),1,1),device=device)
+    tempinv = torch.ones((*(A.shape[:-2]),3,3),device=device)
+    tempinv_norminv = torch.ones(A.shape,device=device)
+    # gamma = torch.ones(A.shape,device=device)
+    for _ in range(100):
+        old_norm[mask] = temp_norm[mask]
+        temp_norm[mask] = torch.linalg.matrix_norm(temp[mask],dim=(-2,-1),keepdim=True)
+        tempinv[mask] = torch.inverse(temp[mask])
+        tempinv_norminv[mask] = torch.linalg.matrix_norm(tempinv[mask],dim=(-2,-1),keepdim=True)
+        # gamma[mask] = torch.sqrt(temp_norm[mask] * 1/tempinv_norminv[mask])
+        # temp[mask] = 0.5*(gamma[mask]*temp[mask] + 1/gamma[mask]*tempinv[mask].mT)
+        temp[mask] = 0.5*(temp[mask] + tempinv[mask].mT)
+        mask = (torch.abs(temp_norm-old_norm)>1e-5).squeeze()
+        if (~mask).all():
+            break
+    return temp
 
 
     

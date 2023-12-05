@@ -26,14 +26,18 @@ logger.addHandler(flie_log)
 #         gpus_list+=f'{i},'
 # os.environ['CUDA_VISIBLE_DEVICES'] = gpus_list[:-1]
 
-backbone_tracts = ['AF', 'ATR', 'CA', 'CC',
-                   'CG', 'CST', 'FPT', 'FX', 'ICP', 'IFO', 'ILF', 'MCP', 'MLF', 'OR', 'POPT', 'SCP',
-                   'SLF_I', 'SLF_II', 'SLF_III', 'STR',
-                   'ST_FO', 'ST_OCC', 'ST_PAR', 'ST_POSTC', 'ST_PREC', 'ST_PREF', 'ST_PREM',
-                   'T_OCC', 'T_PAR', 'T_POSTC', 'T_PREC', 'T_PREF', 'T_PREM', 'UF']
 # backbone_tracts = ['AF', 'ATR', 'CA', 'CC',
-#                    'CG', 'CST', 'FPT', 'FX', 'ICP', 'IFO', 'ILF', 'MCP', 'MLF', 'OR', 'POPT', 'SCP',]
-
+#                    'CG', 'CST', 'FPT', 'FX', 'ICP', 'IFO', 'ILF', 'MCP', 'MLF', 'OR', 'POPT', 'SCP',
+#                    'SLF_I', 'SLF_II', 'SLF_III', 'STR',
+#                    'ST_FO', 'ST_OCC', 'ST_PAR', 'ST_POSTC', 'ST_PREC', 'ST_PREF', 'ST_PREM',
+#                    'T_OCC', 'T_PAR', 'T_POSTC', 'T_PREC', 'T_PREF', 'T_PREM', 'UF']
+backbone_tracts = ['AF', 'ATR', 'CA', 'CC',
+                   'CG', 'CST', 'FPT', 'FX', 'ICP', 'IFO', 'ILF', 'MCP', 'MLF', 'OR', 'POPT', 'SCP',]
+backbone_tracts = []
+def extract_seg(TOM:np.array,threhold=1e-2):
+    assert TOM.shape[0]==3
+    mask = np.sqrt(np.sum(TOM**2,0,keepdims=True))>threhold
+    return mask.astype(np.float32)
 class FiberDatasetDir(Dataset):
     def __init__(self, img_data_dir: pathlib.Path, transform=None, ):
 
@@ -52,27 +56,30 @@ class FiberDatasetDir(Dataset):
         indice_down = np.array(self.shape)//2-np.array([128//2, 160//2, 128//2])
         indice_up =(np.array(self.shape)//2)+np.array([128//2, 160//2, 128//2])
         FA_path = sorted(list(images_dir_path.glob('**/FA_MNI*')))[0]
+        WGCseg_path = f'/data01/junyi/datasets/HCP_20/segmentations/{images_dir_path.name}/SegmentationMap_GMWMCSF.nii.gz'
         struct_dict['FA'] = self.transform(nib.load(FA_path).get_fdata()[::-1],indice_down,indice_up)[np.newaxis, ...]
+        struct_dict['WGCseg'] = self.transform(nib.load(WGCseg_path).get_fdata(),indice_down,indice_up)[np.newaxis, ...]
         
         
-
-        for tract in backbone_tracts:
+        tracts16 = ['AF', 'ATR', 'CA', 'CC',
+                   'CG', 'CST', 'FPT', 'FX', 'ICP', 'IFO', 'ILF', 'MCP', 'MLF', 'OR', 'POPT', 'SCP',]
+        for tract in tracts16:
             TOM_path = sorted(list((images_dir_path/'T1w/Diffusion/tractseg_output/TOM_new/').glob(f'{tract}.nii.gz')))[0]
             struct_dict[tract] = self.transform(nib.load(TOM_path).get_fdata()[::-1],indice_down,indice_up).transpose(-1,0,1,2)
-            
-            seg_left_paths = sorted(list((images_dir_path/'T1w/Diffusion/tractseg_output/bundle_segmentations').glob(f'{tract}_left.nii.gz')))
-            seg_left_path = seg_left_paths[0] if len(seg_left_paths) else None
-            seg_right_paths = sorted(list((images_dir_path/'T1w/Diffusion/tractseg_output/bundle_segmentations').glob(f'{tract}_right.nii.gz')))
-            seg_right_path = seg_right_paths[0] if len(seg_left_paths) else None
-            if seg_left_path ==None:
-                seg_path = sorted(list((images_dir_path/'T1w/Diffusion/tractseg_output/bundle_segmentations').glob(f'{tract}.nii.gz')))[0]
-                struct_dict[tract+'seg'] = self.transform(nib.load(seg_path).get_fdata()[::-1],indice_down,indice_up)[np.newaxis, ...]
-            else:
-                struct_dict[tract+'seg'] = self.transform(nib.load(seg_left_path).get_fdata()[::-1],indice_down,indice_up)[np.newaxis, ...]\
-                +self.transform(nib.load(seg_right_path).get_fdata()[::-1],indice_down,indice_up)[np.newaxis, ...]
+            struct_dict[tract+'seg'] = extract_seg(struct_dict[tract])
+            # seg_left_paths = sorted(list((images_dir_path/'T1w/Diffusion/tractseg_output/bundle_segmentations').glob(f'{tract}_left.nii.gz')))
+            # seg_left_path = seg_left_paths[0] if len(seg_left_paths) else None
+            # seg_right_paths = sorted(list((images_dir_path/'T1w/Diffusion/tractseg_output/bundle_segmentations').glob(f'{tract}_right.nii.gz')))
+            # seg_right_path = seg_right_paths[0] if len(seg_left_paths) else None
+            # if seg_left_path ==None:
+            #     seg_path = sorted(list((images_dir_path/'T1w/Diffusion/tractseg_output/bundle_segmentations').glob(f'{tract}.nii.gz')))[0]
+            #     struct_dict[tract+'seg'] = self.transform(nib.load(seg_path).get_fdata()[::-1],indice_down,indice_up)[np.newaxis, ...]
+            # else:
+            #     struct_dict[tract+'seg'] = (self.transform(nib.load(seg_left_path).get_fdata()[::-1],indice_down,indice_up)[np.newaxis, ...]\
+            #     +self.transform(nib.load(seg_right_path).get_fdata()[::-1],indice_down,indice_up)[np.newaxis, ...])>0.5
         
         return struct_dict
-    
+
 class SpatialTransformer(nn.Module):
     """
     N-D Spatial Transformer
@@ -122,9 +129,10 @@ def crop(x,indice_down, indice_up):
     return x[indice_down[0]:indice_up[0],indice_down[1]:indice_up[1],indice_down[2]:indice_up[2]]
     
 def main():
-    device = 'cuda:0'
-    i = 9
-    snapshot_whole_path = f'/data01/junyi/models/models_sep/snapshot20_alltracts_whole.pt'
+    device = 'cuda:4'
+    i = 'FA_only'
+    snapshot_whole_path = f'/data01/junyi/models/snapshot20_16tracts_0.5_whole.pt'
+    snapshot_whole_path = f'./snapshot_FA_only_whole.pt'
     fd = FiberDatasetDir('/data01/junyi/datasets/HCP_100',crop)
     root_dir = '/data01/junyi/results/tracts_related'
     # if not pathlib.Path(f'{root_dir}/TOM{i}').exists():
@@ -133,11 +141,17 @@ def main():
     if not FApath.exists():
         os.mkdir(FApath.parent)if not FApath.parent.exists() else None
         os.mkdir(FApath)
+    WGCsegpath = pathlib.Path(f'{root_dir}/seg{i}/WGC')
+    if not WGCsegpath.exists():
+        os.mkdir(WGCsegpath.parent)if not WGCsegpath.parent.exists() else None
+        os.mkdir(WGCsegpath)
     flowpath = pathlib.Path(f'{root_dir}/flow{i}/whole')
     if not flowpath.exists():
         os.mkdir(flowpath.parent)if not flowpath.parent.exists() else None
         os.mkdir(flowpath)
-    for tract in backbone_tracts:
+    tracts16 = ['AF', 'ATR', 'CA', 'CC',
+                   'CG', 'CST', 'FPT', 'FX', 'ICP', 'IFO', 'ILF', 'MCP', 'MLF', 'OR', 'POPT', 'SCP',]
+    for tract in tracts16:
         TOMpath = pathlib.Path(f'{root_dir}/TOM{i}/{tract}')
         os.mkdir(TOMpath.parent) if not TOMpath.parent.exists() else None
         os.mkdir(TOMpath) if not TOMpath.exists() else None
@@ -159,31 +173,35 @@ def main():
     vol_shape = (128, 160, 128)
     enc_nf = [16, 32, 32, 32]
     dec_nf = [32, 32, 32, 32, 32, 16, 16]
-    batch_size = 4
+    batch_size = 6
 
     atlas = torch.empty(3, *vol_shape)
     snapshot = torch.load(snapshot_whole_path,map_location='cpu')
 
     TOM_models = {}
     for tract in backbone_tracts:
-        # snapshot_path = f'snapshot1_{tract}.pt'
+        # snapshot_path = f'/data01/junyi/models/models_sep/snapshot1_{tract}.pt'
         # snapshot = torch.load(snapshot_path,map_location='cpu')
         TOM_models[tract] = networks.TemplateCreation(vol_shape,atlas,nb_unet_features=[enc_nf, dec_nf],altas_feats=3,src_feats=3)
 
     
     atlas = torch.zeros(1,*vol_shape)
-    model = networks.WholeModel(vol_shape,atlas,TOM_models,nb_unet_features=[enc_nf, dec_nf],altas_feats=1,src_feats=1,FA_only=False,use_TOM=False)
+    model = networks.WholeModel(vol_shape,atlas,TOM_models,nb_unet_features=[enc_nf, dec_nf],altas_feats=1,src_feats=1,FA_only=True,use_TOM=False)
 
     model.load_state_dict(snapshot["MODEL_STATE"])
 
     bilinST = SpatialTransformer(vol_shape,mode='bilinear')
     nnST = SpatialTransformer(vol_shape,mode='nearest')
     reorient = layers.TOMReorientation(vol_shape)
-    segs_dict = {tract:[] for tract in backbone_tracts}
-    TOMs_dict = {tract:[] for tract in backbone_tracts}
+    
+    segs_dict = {tract:[] for tract in tracts16}
+    TOMs_dict = {tract:[] for tract in tracts16}
+    TOMs_rot_dict = {tract+'rot':[] for tract in tracts16}
     FAs_list = []
     flows_list = []
+    WGC_list = []
     dataloader = DataLoader(fd,batch_size,num_workers=2)
+    
     with torch.no_grad():
         model.eval().to(device)
         
@@ -198,29 +216,34 @@ def main():
             this_batch_size = flows.shape[0]
             rotMat = reorient(flows)
 
-            for tract in backbone_tracts:
+            for tract in tracts16:
                 logger.info(f'Registing on {tract}...')
             
-                register_segs[tract] = nnST(data_dict[tract+'seg'],flows)
+                register_segs[tract] = nnST(data_dict[tract+'seg'].float(),flows)
                 TOM_tmp = bilinST(data_dict[tract],flows)
-                
-                register_TOMs[tract] = reorient.batched_rotate(rotMat,TOM_tmp)
+                register_TOMs[tract] = TOM_tmp
+                register_TOMs[tract+'rot'] = reorient.batched_rotate(rotMat,TOM_tmp)
                 segs_dict[tract] += [register_segs[tract][i].squeeze().numpy()[::-1] for i in range(this_batch_size)]
+                # segs_dict[tract] += [extract_seg(register_TOMs[tract][i].float().cpu()).squeeze().numpy()[::-1] for i in range(this_batch_size)]
                 TOMs_dict[tract] += [register_TOMs[tract][i].float().cpu().permute(1,2,3,0).numpy()[::-1] for i in range(this_batch_size)]
+                TOMs_rot_dict[tract+'rot'] += [register_TOMs[tract+'rot'][i].float().cpu().permute(1,2,3,0).numpy()[::-1] for i in range(this_batch_size)]
                 logger.info(f'Registing on {tract} done')
             FAs_list += [register_FAs[i].cpu().squeeze().numpy()[::-1] for i in range(this_batch_size)]
+            WGC_list += [nnST(data_dict['WGCseg'].float(),flows).squeeze().numpy()[i,::-1] for i in range(this_batch_size)]
             flows_list += [flows[i].permute(1,2,3,0).numpy()[::-1] for i in range(this_batch_size)]
-            torch.cuda.empty_cache()
+            # torch.cuda.empty_cache()
         logger.info(f'Ready for Saving.')
         for i,FA in enumerate(FAs_list):
 
             nib.save(nib.Nifti1Image(FA, affine, header),FApath/f'SUB{i:03d}.nii.gz')
+            nib.save(nib.Nifti1Image(WGC_list[i], affine, header),segpath.parent/f'WGC'/f'WGC{i:03d}.nii.gz')
             nib.save(nib.Nifti1Image(flows_list[i], affine, header),flowpath/f'SUB{i:03d}.nii.gz')
-            for tract in backbone_tracts:
+            for tract in tracts16:
                 logger.info(f'Saving {tract} of Sub{i:03d}...')
                 nib.save(nib.Nifti1Image(TOMs_dict[tract][i], affine, header),TOMpath.parent/f'{tract}'/f'{tract}{i:03d}.nii.gz')
+                nib.save(nib.Nifti1Image(TOMs_rot_dict[tract+'rot'][i], affine, header),TOMpath.parent/f'{tract}'/f'{tract}rot{i:03d}.nii.gz')
                 nib.save(nib.Nifti1Image(segs_dict[tract][i], affine, header),segpath.parent/f'{tract}'/f'{tract}{i:03d}.nii.gz')
-                os.system(f'tckgen -algorithm FACT {TOMpath.parent}/{tract}/{tract}{i:03d}.nii.gz {tractpath.parent}/{tract}/{tract}{i:03d}.tck -minlength 40 -maxlength 250 -select 2000  -nthreads 24 -seed_image {segpath.parent}/{tract}/{tract}{i:03d}.nii.gz -mask {segpath.parent}/{tract}/{tract}{i:03d}.nii.gz -force')
+                os.system(f'tckgen -algorithm FACT {TOMpath.parent}/{tract}/{tract}rot{i:03d}.nii.gz {tractpath.parent}/{tract}/{tract}{i:03d}.tck -minlength 40 -maxlength 250 -select 2000  -nthreads 24 -seed_image {segpath.parent}/{tract}/{tract}{i:03d}.nii.gz -mask {segpath.parent}/{tract}/{tract}{i:03d}.nii.gz -force')
                 os.system(f'tckconvert {tractpath.parent}/{tract}/{tract}{i:03d}.tck {vtkpath.parent}/{tract}/{tract}{i:03d}.vtk -force')
         
 if __name__ =='__main__':
