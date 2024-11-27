@@ -377,15 +377,18 @@ class WholeModel(nn.Module):
                  int_downsize=2,
                  int_steps=7,
                  FA_only = False,
+                 flow_bias = True,
+                 stream_len = 1,
                  **kwargs):
         super(WholeModel,self).__init__()
         ndims = len(inshape)
         self.TOM_models = nn.ModuleDict(TOM_models)
-        self.FA_model = TemplateCreation(inshape,init_altas,**kwargs)
+        self.FA_model = torch.compile(TemplateCreation(inshape,init_altas,**kwargs))
         if not FA_only:
-            self.flow_multi = ConvBlock(ndims,(len(TOM_models) + 1) * 3, 3,)
+            self.flow_multi = ConvBlock(ndims,(len(TOM_models) + 1) * 3, 3,bias=flow_bias)
             nn.init.normal_(self.flow_multi.main.weight,mean=0,std=1e-3)
-            nn.init.zeros_(self.flow_multi.main.bias)
+            if flow_bias:
+                nn.init.zeros_(self.flow_multi.main.bias)
 
         down_shape = [int(dim / int_downsize) for dim in inshape]
     
@@ -399,7 +402,7 @@ class WholeModel(nn.Module):
         self.transformer = layers.SpatialTransformer(inshape)
         self.reorient = layers.TOMReorientation(inshape,)
         self.FA_only = FA_only
-
+        self.stream_len = stream_len
     # @torch.compile
     def forward(self, inputs_dict: dict[str,torch.Tensor],fusion_regist=True, registration=False,**kwargs):
         registed_dict = {}
@@ -409,12 +412,22 @@ class WholeModel(nn.Module):
                 if registration:
                     return FA_registed, pos_flow
         else:
-            flow_TOMs = []
+            flow_TOMs = {}
+
+            stream_len = self.stream_len
+            stream_list = [torch.cuda.Stream() for i in range(stream_len)]
+            torch.cuda.synchronize()
             with torch.no_grad():
-                for key, TOM_model in self.TOM_models.items():
-                    flow_TOM = TOM_model(inputs_dict[key],fusion_regist = fusion_regist)
-                    flow_TOMs.append(flow_TOM)
-            self.flow_TOMs = flow_TOMs
+                for i, (key, TOM_model) in enumerate(self.TOM_models.items()):
+                    stream = stream_list[i%stream_len]
+                    with torch.cuda.stream(stream):
+                        flow_TOM = TOM_model(inputs_dict[key],fusion_regist = fusion_regist)
+                        flow_TOMs[key] = flow_TOM
+            torch.cuda.synchronize()
+            
+            self.flow_TOMs = [values for _, values in flow_TOMs.items()]
+            del flow_TOMs
+            
             flow_FA = self.FA_model(inputs_dict['FA'],fusion_regist=fusion_regist)
             batch_size = flow_FA.shape[0]
             if self.training:
@@ -426,7 +439,118 @@ class WholeModel(nn.Module):
             else:
                 rand_tensor = 1
             # logging.info(f'Drop path {rand_tensor}')
-            flow_fusion = self.flow_multi(torch.cat([rand_tensor*torch.cat(flow_TOMs,dim=1),flow_FA],dim=1))
+            flow_fusion = self.flow_multi(torch.cat([rand_tensor*torch.cat(self.flow_TOMs,dim=1),flow_FA],dim=1))
+            # logging.info(f'Predict {flow_fusion}')
+            if self.integrate:
+                flow_fusion = self.integrate(flow_fusion)
+                neg_flow_fusion = self.integrate(-flow_fusion)
+
+                # resize to final resolution
+                if self.fullsize:
+                    pos_flow = self.fullsize(flow_fusion)
+                    neg_flow = self.fullsize(neg_flow_fusion)
+            # logging.info(f'Predict {neg_flow}')
+            mean_flow = self.FA_model.mean_stream(neg_flow,registration)
+            # logging.info(f'Predict {mean_flow}')
+            # warp image with flow field
+            FA_registed = self.transformer(inputs_dict['FA'], pos_flow)
+            if registration:
+                return FA_registed, pos_flow
+            
+            FA_atlas_registed = self.transformer(torch.stack([self.FA_model.atlas for _ in range(batch_size)]), neg_flow)
+
+            registed_dict = {}
+            registed_dict['FA'] = FA_atlas_registed
+            rotMat = self.reorient(neg_flow)
+            for keys, TOM_model in self.TOM_models.items():
+                TOM_atlas_registed = self.reorient.batched_rotate(rotMat, torch.stack([TOM_model.atlas for _ in range(batch_size)]))
+                TOM_atlas_registed = self.transformer(TOM_atlas_registed, neg_flow)
+                registed_dict[keys] = TOM_atlas_registed
+
+        return FA_registed, registed_dict, mean_flow, pos_flow
+
+
+class WholeModel_new(nn.Module):
+    def __init__(self, inshape, init_altas, 
+                 TOM_models:dict[str,TemplateCreation], 
+                 *args,
+                 int_downsize=2,
+                 int_steps=7,
+                 FA_only = False,
+                 **kwargs):
+        super(WholeModel_new,self).__init__()
+        ndims = len(inshape)
+        self.TOM_models = nn.ModuleDict(TOM_models)
+        self.FA_model = torch.compile(TemplateCreation(inshape,init_altas,**kwargs))
+        if not FA_only:
+            self.prob_multi = ConvBlock(ndims,(len(TOM_models) + 1) * 3, (len(TOM_models) + 1),)
+            self.flow_conv = ConvBlock(ndims,3, 3,)
+            nn.init.normal_(self.flow_conv.main.weight,mean=0,std=1e-3)
+            nn.init.zeros_(self.flow_conv.main.bias)
+            nn.init.normal_(self.prob_multi.main.weight,mean=0,std=1e-3)
+            nn.init.zeros_(self.prob_multi.main.bias)
+
+        down_shape = [int(dim / int_downsize) for dim in inshape]
+    
+        self.integrate = layers.VecInt(down_shape, int_steps) if int_steps > 0 else None
+        # resize to full res
+        if int_steps > 0 and int_downsize > 1:
+            self.fullsize = layers.ResizeTransform(1 / int_downsize, ndims)
+        else:
+            self.fullsize = None
+        # configure transformer
+        self.transformer = layers.SpatialTransformer(inshape)
+        self.reorient = layers.TOMReorientation(inshape,)
+        self.FA_only = FA_only
+        self.stream_len = 4
+
+    # @torch.compile
+    def forward(self, inputs_dict: dict[str,torch.Tensor],fusion_regist=True, registration=False,**kwargs):
+        registed_dict = {}
+        FA_only = self.FA_only
+        if FA_only:
+                FA_registed, registed_dict['FA'], mean_flow, pos_flow = self.FA_model(inputs_dict['FA'],fusion_regist=False)
+                if registration:
+                    return FA_registed, pos_flow
+        else:
+            flow_TOMs = {}
+            mask_TOM = {}
+            
+
+            with torch.no_grad():
+                stream_len = self.stream_len
+                stream_list = [torch.cuda.Stream() for i in range(stream_len)]
+                for i,(key, TOM_model) in enumerate(self.TOM_models.items()):
+                    stream = stream_list[i%stream_len]
+                    with torch.cuda.stream(stream):
+                        flow_TOM = TOM_model(inputs_dict[key],fusion_regist = fusion_regist)
+                        flow_TOMs[key] = flow_TOM
+                    # flow_TOM = TOM_model(inputs_dict[key],fusion_regist = fusion_regist)
+                    # # mask_TOM[key] = inputs_dict[key].norm(dim=1,keepdim=True) > 0.5
+                    # flow_TOMs[key] = flow_TOM
+            torch.cuda.synchronize()
+            self.flow_TOMs = [values for _, values in flow_TOMs.items()]
+            del flow_TOMs
+            
+            flow_FA = self.FA_model(inputs_dict['FA'],fusion_regist=fusion_regist)
+            batch_size = flow_FA.shape[0]
+            if self.training:
+                drop_prob = 0
+                rand_tensor_shape = (batch_size,len(inputs_dict)-1)+(1,)*(flow_FA.ndim-2)
+                rand_tensor = 1-drop_prob+torch.rand(rand_tensor_shape,dtype=flow_FA.dtype,device=flow_FA.device)
+                rand_tensor.floor_()
+                rand_tensor = torch.stack([rand_tensor for _ in range(3)],dim=1).reshape((batch_size,3*(len(inputs_dict)-1),*rand_tensor_shape[2:]))
+            else:
+                rand_tensor = 1
+            # logging.info(f'Drop path {rand_tensor}')
+            
+            # with torch.no_grad():
+            tmp_tensor = torch.cat([rand_tensor*torch.cat(self.flow_TOMs,dim=1),flow_FA],dim=1)
+            prob = self.prob_multi(tmp_tensor)
+            flow_multi = (torch.exp(F.log_softmax(prob,dim=1)[:,:,None]) * torch.stack(self.flow_TOMs+[flow_FA],dim=1)).sum(dim=1)
+            flow_fusion = self.flow_conv(flow_multi)
+            
+            
             # logging.info(f'Predict {flow_fusion}')
             if self.integrate:
                 flow_fusion = self.integrate(flow_fusion)
@@ -456,17 +580,16 @@ class WholeModel(nn.Module):
 
         
         return FA_registed, registed_dict, mean_flow, pos_flow
-            
 class ConvBlock(nn.Module):
     """
     Specific convolutional block followed by leakyrelu for unet.
     """
 
-    def __init__(self, ndims,  in_channels, out_channels, stride=1):
+    def __init__(self, ndims,  in_channels, out_channels, stride=1,bias=True):
         super().__init__()
 
         Conv = getattr(nn, 'Conv%dd' % ndims)
-        self.main = Conv(in_channels, out_channels, 3, stride, 1)
+        self.main = Conv(in_channels, out_channels, 3, stride, 1, bias=bias)
         self.activation = nn.LeakyReLU(0.2)
     # @torch.compile
     def forward(self, x):

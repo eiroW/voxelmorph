@@ -16,7 +16,7 @@ backbone_tracts = ['AF', 'ATR', 'CA', 'CC',
 class FiberDatasetDir(Dataset):
     def __init__(self, img_data_dir: pathlib.Path, backbone_tracts: list,transform=None, FA_only=True):
 
-        self.img_data_dir = sorted(list(pathlib.Path(img_data_dir).iterdir()))
+        self.img_data_dir = sorted(path for path in pathlib.Path(img_data_dir).iterdir() if 'seg' not in path.name)
         self.transform = transform
         tmp = nib.load(list(self.img_data_dir[0].glob('**/FA_MNI*'))[0])
         self.config = (tmp.affine,tmp.header)
@@ -38,18 +38,18 @@ class FiberDatasetDir(Dataset):
         p.join()
 
         logger.info('Data preprocess done')
-        self.data_tmp = sorted(list(data_tmp.iterdir()))
+        self.data_tmp = sorted(data_tmp.glob('data*.npz'))
+        self.init_atlas = {tract : np.stack([np.load(path,allow_pickle=True)[tract] for path in self.data_tmp[:10]]).mean(0) for tract in self.backbone_tracts}
         
 
     def _pre_load(self,image_dir:pathlib.Path):
         struct_dict = {}
         FA_path = sorted(list(image_dir.glob('**/FA_MNI*')))[0]
         struct_dict['FA'] = self.transform(nib.load(FA_path).get_fdata()[::-1],(128, 160, 128))[np.newaxis, ...]
-        if not self.FA_only:
-            for tract in self.backbone_tracts:
-                logger.debug(tract)
-                TOM_path = sorted(list((image_dir/'T1w/Diffusion/tractseg_output/TOM_new/').glob(f'{tract}.nii.gz')))[0]
-                struct_dict[tract] = self.transform(nib.load(TOM_path).get_fdata()[::-1],(128, 160, 128)).transpose(-1,0,1,2)
+        for tract in self.backbone_tracts:
+            logger.debug(tract)
+            TOM_path = sorted(list((image_dir/'T1w/Diffusion/tractseg_output/TOM_new/').glob(f'{tract}.nii.gz')))[0]
+            struct_dict[tract] = self.transform(nib.load(TOM_path).get_fdata()[::-1],(128, 160, 128)).transpose(-1,0,1,2)
         return struct_dict
 
 

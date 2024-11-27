@@ -45,7 +45,7 @@ class SpatialTransformer(nn.Module):
             new_locs = new_locs[..., [1, 0]]
         elif len(shape) == 3:
             new_locs = new_locs.permute(0, 2, 3, 4, 1)
-            new_locs = new_locs[..., [2, 1, 0]]
+            new_locs = new_locs.flip(-1)
 
         return nnf.grid_sample(src, new_locs, align_corners=True, mode=self.mode)
 
@@ -63,11 +63,19 @@ class VecInt(nn.Module):
         self.scale = 1.0 / (2 ** self.nsteps)
         self.transformer = SpatialTransformer(inshape)
 
-    def forward(self, vec):
-        vec = vec * self.scale
-        for _ in range(self.nsteps):
-            vec = vec + self.transformer(vec, vec)
-        return vec
+    def forward(self, vec, init_vec=None):
+        if init_vec is None:
+            vec = vec * self.scale
+            for _ in range(self.nsteps):
+                vec = vec + self.transformer(vec, vec)
+            return vec
+        else:
+            vec = vec * self.scale
+            for _ in range(self.nsteps):
+                vec = vec + self.transformer(vec, vec)
+                init_vec = init_vec + vec
+            return vec, init_vec
+            
 
 
 class ResizeTransform(nn.Module):
@@ -176,10 +184,8 @@ class TOMReorientation(nn.Module):
         # self.ident = grid
         self.size = size
         self.flatten = nn.Flatten(start_dim=2)
-    @torch.compile
+    # @torch.compile
     def forward(self,flow):
-        # new locations
-        # rotMat,keep = 
         return self.compute_rotMat(flow.detach())
     
     @torch.no_grad()
@@ -193,14 +199,14 @@ class TOMReorientation(nn.Module):
         return fast_polar(JacobiMat+self.ident)
     
     @torch.no_grad()
-    def compute_rotMat_skew_sym(self, trans_grid:torch.Tensor):
+    def compute_rotMat_svd(self, trans_grid:torch.Tensor):
         # Compute Jacobian matrix and trans it into size(*inshape, 3, 3)
         JacobiMat = torch.stack(gradient(trans_grid),dim=1).permute(1,2,3,4,5,0)
         JacobiMat = self.flatten(JacobiMat).permute(-1,0,1).contiguous()
 
-        # U,_,V= torch.svd(JacobiMat)
-        # rotMat = torch.matmul(U.transpose(-1,-2),V)
-        return skew_sym(JacobiMat)
+        U,_,V= torch.svd(JacobiMat+self.ident)
+        rotMat = torch.matmul(U,V.mT)
+        return rotMat
     
     # 
     def batched_rotate(self,rotMat:torch.Tensor, src:torch.Tensor):
@@ -212,8 +218,10 @@ class TOMReorientation(nn.Module):
         return src.reshape(*(self.size),batch_size,3).permute(-2,-1,0,1,2)
 
 def gradient(trans_grid):
-    return torch.gradient(trans_grid, dim=(-3,-2,-1))
+    shape = trans_grid.shape[-3:]
+    return torch.gradient(trans_grid, dim=(-3,-2,-1),spacing = [2/i for i in shape])
 
+@torch.autocast('cuda',dtype=torch.float32)
 def orthogonalize(X:torch.Tensor):
     xtype = X.dtype
     # Half SVD have not be implemented
@@ -227,11 +235,12 @@ def orthogonalize(X:torch.Tensor):
 def fast_polar(A:torch.Tensor):
     temp = A
     device = A.device
-    temp_norm = torch.ones((*(A.shape[:-2]),1,1),device=device)
+    A.dtype
+    temp_norm = torch.ones((*(A.shape[:-2]),1,1),device=device,dtype=A.dtype)
     mask = torch.ones(A.shape[:-2],dtype=bool,device=device)
-    old_norm = torch.ones((*(A.shape[:-2]),1,1),device=device)
-    tempinv = torch.ones((*(A.shape[:-2]),3,3),device=device)
-    tempinv_norminv = torch.ones(A.shape,device=device)
+    old_norm = torch.ones((*(A.shape[:-2]),1,1),device=device,dtype=A.dtype)
+    tempinv = torch.ones((*(A.shape[:-2]),3,3),device=device,dtype=A.dtype)
+    tempinv_norminv = torch.ones(A.shape,device=device,dtype=A.dtype)
     # gamma = torch.ones(A.shape,device=device)
     for _ in range(100):
         old_norm[mask] = temp_norm[mask]

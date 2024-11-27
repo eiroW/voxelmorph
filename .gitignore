@@ -28,3 +28,12 @@ share/python-wheels/
 *.log
 *.out
 MANIFEST
+
+*.csv
+*.ipynb
+*.png
+*.txt
+*.nhdr
+*.json
+*.nii.gz
+
