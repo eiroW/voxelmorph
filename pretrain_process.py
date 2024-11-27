@@ -19,14 +19,14 @@ def run(tract,i):
         return None
     else:
         print(f'training {tract} at device {device} on port {PORTS[i]}')
-        # subprocess.run([
-        #             '/home/junyi/.conda/envs/mainpyenv/bin/torchrun',
-        #             '--nproc-per-node=1',
-        #             f'--master-port={PORTS[i]}',
-        #             'train-atlas.py', f'{EPOCHS}', '10', tract,
-        #             '--batch_size', '4',
-        #             '--save_path_prefix', f'/data04/junyi/models/models_sep/{tract}_trained',
-        #             '--init_atlas', 'FA_init_atlas.pt'])
+        subprocess.run([
+                    '/home/junyi/.conda/envs/mainpyenv/bin/torchrun',
+                    '--nproc-per-node=1',
+                    f'--master-port={PORTS[i]}',
+                    'train-atlas.py', f'{EPOCHS}', '10', tract,
+                    '--batch_size', '4',
+                    '--save_path_prefix', f'/data04/junyi/models/models_sep/{tract}_trained',
+                    '--init_atlas', 'FA_init_atlas.pt'])
         return None
 def check_log(logfile):
     if not pathlib.Path(logfile).exists():
